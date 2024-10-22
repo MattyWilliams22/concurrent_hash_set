@@ -12,38 +12,43 @@ class HashSetSequential : public HashSetBase<T> {
   explicit HashSetSequential(size_t initial_capacity) {
     set_size_ = 0;
     for (size_t i = 0; i < initial_capacity; i++) {
-      std::vector<T> v;
-      table_.push_back(v);
+      table_.push_back(std::vector<T>());
     }
   }
 
   bool Add(T elem) final {
-    bool result = false;
     size_t bucket = std::hash<T>()(elem) % table_.size();
-    result = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
-             table_[bucket].end();
-    table_[bucket].push_back(elem);
-    set_size_ = result ? set_size_ + 1 : set_size_;
-    return result;
+    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
+                           elem) != table_[bucket].end();
+
+    if (!found) {
+      table_[bucket].push_back(elem);
+      set_size_++;
+    }
+
+    return !found;
   }
 
   bool Remove(T elem) final {
-    bool result = false;
     size_t bucket = std::hash<T>()(elem) % table_.size();
-    result = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
-             table_[bucket].end();
-    table_[bucket].erase(
-        std::remove(table_[bucket].begin(), table_[bucket].end(), elem),
-        table_[bucket].end());
-    set_size_ = result ? set_size_ - 1 : set_size_;
-    return result;
+
+    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
+                           elem) != table_[bucket].end();
+
+    if (found) {
+      table_[bucket].erase(
+          std::remove(table_[bucket].begin(), table_[bucket].end(), elem),
+          table_[bucket].end());
+      set_size_--;
+    }
+
+    return found;
   }
 
   [[nodiscard]] bool Contains(T elem) final {
     size_t bucket = std::hash<T>()(elem) % table_.size();
-    bool result = std::find(table_[bucket].begin(), table_[bucket].end(),
-                            elem) != table_[bucket].end();
-    return result;
+    return std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
+           table_[bucket].end();
   }
 
   [[nodiscard]] size_t Size() const final { return set_size_; }
