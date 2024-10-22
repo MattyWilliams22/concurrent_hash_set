@@ -1,7 +1,9 @@
 #ifndef HASH_SET_STRIPED_H
 #define HASH_SET_STRIPED_H
 
+#include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <vector>
@@ -12,7 +14,8 @@ template <typename T>
 class HashSetStriped : public HashSetBase<T> {
  public:
   explicit HashSetStriped(size_t initial_capacity) {
-    set_size_ = 0;
+    set_size_.store(0);
+    modifiers_.store(0);
     for (size_t i = 0; i < initial_capacity; i++) {
       table_.push_back(std::vector<T>());
       mutexes_.push_back(std::mutex());
@@ -23,6 +26,7 @@ class HashSetStriped : public HashSetBase<T> {
     size_t bucket = std::hash<T>()(elem) % table_.size();
     bool found = false;
 
+    modifiers_.fetch_add(1);
     {
       std::scoped_lock lock(mutexes_[bucket]);
       found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
@@ -33,10 +37,12 @@ class HashSetStriped : public HashSetBase<T> {
       }
     }
 
-    std::scoped_lock lock(size_mutex_);
     if (!found) {
-      set_size_++;
+      set_size_.fetch_add(1);
     }
+
+    modifiers_.fetch_sub(1);
+    clear_to_read_size_.notify_all();
     return !found;
   }
 
@@ -44,6 +50,7 @@ class HashSetStriped : public HashSetBase<T> {
     size_t bucket = std::hash<T>()(elem) % table_.size();
     bool found = false;
 
+    modifiers_.fetch_add(1);
     {
       std::scoped_lock lock(mutexes_[bucket]);
       found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
@@ -56,10 +63,11 @@ class HashSetStriped : public HashSetBase<T> {
       }
     }
 
-    std::scoped_lock lock(size_mutex_);
     if (found) {
-      set_size_--;
+      set_size_.fetch_sub(1);
     }
+    modifiers_.fetch_sub(1);
+    clear_to_read_size_.notify_all();
     return found;
   }
 
@@ -72,14 +80,17 @@ class HashSetStriped : public HashSetBase<T> {
   }
 
   [[nodiscard]] size_t Size() const final {
-    std::scoped_lock lock(size_mutex_);
-    return set_size_;
+    std::unique_lock lock(size_mutex_);
+    clear_to_read_size_.wait(lock, [&] { return modifiers_.load() == 0; });
+    return set_size_.load();
   }
 
  private:
   std::vector<std::vector<T> > table_;
-  size_t set_size_;
   std::vector<std::mutex> mutexes_;
+  std::atomic<size_t> set_size_;
+  std::atomic<size_t> modifiers_;
+  std::condition_variable clear_to_read_size_;
   std::mutex size_mutex_;
 };
 
