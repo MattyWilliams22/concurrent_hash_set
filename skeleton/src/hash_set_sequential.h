@@ -9,15 +9,20 @@
 template <typename T>
 class HashSetSequential : public HashSetBase<T> {
  public:
-  explicit HashSetSequential(size_t initial_capacity) {
+  explicit HashSetSequential(size_t initial_capacity)
+      : capacity_(initial_capacity) {
     set_size_ = 0;
-    for (size_t i = 0; i < initial_capacity; i++) {
+    for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
     }
   }
 
   bool Add(T elem) final {
-    size_t bucket = std::hash<T>()(elem) % table_.size();
+    if (set_size_ == capacity_) {
+      Resize();
+    }
+
+    size_t bucket = std::hash<T>()(elem) % capacity_;
     bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
                            elem) != table_[bucket].end();
 
@@ -30,7 +35,7 @@ class HashSetSequential : public HashSetBase<T> {
   }
 
   bool Remove(T elem) final {
-    size_t bucket = std::hash<T>()(elem) % table_.size();
+    size_t bucket = std::hash<T>()(elem) % capacity_;
 
     bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
                            elem) != table_[bucket].end();
@@ -46,7 +51,7 @@ class HashSetSequential : public HashSetBase<T> {
   }
 
   [[nodiscard]] bool Contains(T elem) final {
-    size_t bucket = std::hash<T>()(elem) % table_.size();
+    size_t bucket = std::hash<T>()(elem) % capacity_;
     return std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
            table_[bucket].end();
   }
@@ -56,6 +61,28 @@ class HashSetSequential : public HashSetBase<T> {
  private:
   std::vector<std::vector<T> > table_;
   size_t set_size_;
+  size_t capacity_;
+
+  void Resize() {
+    for (size_t i = 0; i < capacity_; i++) {
+      table_.push_back(std::vector<T>());
+    }
+
+    std::vector<T> buffer{};
+    for (size_t i = 0; i < capacity_; i++) {
+      for (size_t j = 0; j < table_[i].size(); j++) {
+        int bucket = std::hash<T>()(table_[i][j]) % capacity_;
+        if (bucket == i) {
+          buffer.push_back(table_[i][j]);
+        } else {
+          table_[bucket].push_back(table_[i][j]);
+        }
+      }
+      buffer.clear();
+    }
+
+    capacity_ = capacity_ * 2;
+  }
 };
 
 #endif  // HASH_SET_SEQUENTIAL_H
