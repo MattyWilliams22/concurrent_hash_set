@@ -1,8 +1,8 @@
 #ifndef HASH_SET_STRIPED_H
 #define HASH_SET_STRIPED_H
 
+#include <algorithm>
 #include <atomic>
-#include <cassert>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -14,26 +14,35 @@ template <typename T>
 class HashSetStriped : public HashSetBase<T> {
  public:
   explicit HashSetStriped(size_t initial_capacity)
-      : capacity_(initial_capacity) {
+      : capacity_{initial_capacity} {
     set_size_.store(0);
     modifiers_.store(0);
     resizing_.store(false);
     for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
-      mutexes_.push_back(std::mutex());
+      mutexes_.push_back(std::make_unique<std::mutex>());
     }
   }
 
   bool Add(T elem) final {
-    std::unique_lock resize_lock(resizing_mutex_);
+    std::unique_lock<std::mutex> resize_lock(resizing_mutex_);
     clear_to_modify_.wait(resize_lock, [this] { return !resizing_.load(); });
+
+    if (set_size_.load() >= capacity_ && !resizing_.load()) {
+      resizing_.store(true);
+      std::unique_lock<std::mutex> lock(size_mutex_);
+      clear_to_read_size_.wait(lock, [this] { return modifiers_.load() == 0; });
+
+      Resize();
+      resizing_.store(false);
+    }
 
     size_t bucket = std::hash<T>()(elem) % table_.size();
     bool found = false;
 
     modifiers_.fetch_add(1);
     {
-      std::scoped_lock lock(mutexes_[bucket % mutexes_.size()]);
+      std::scoped_lock<std::mutex> lock(*mutexes_[bucket % mutexes_.size()]);
       found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
               table_[bucket].end();
 
@@ -44,11 +53,6 @@ class HashSetStriped : public HashSetBase<T> {
 
     if (!found) {
       set_size_.fetch_add(1);
-    }
-
-    if (set_size_.load() >= capacity_ && !resizing_.load()) {
-      resizing_.store(true);
-      Resize();
     }
 
     modifiers_.fetch_sub(1);
@@ -62,7 +66,7 @@ class HashSetStriped : public HashSetBase<T> {
 
     modifiers_.fetch_add(1);
     {
-      std::scoped_lock lock(mutexes_[bucket % mutexes_.size()]);
+      std::scoped_lock<std::mutex> lock(*mutexes_[bucket % mutexes_.size()]);
       found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
               table_[bucket].end();
 
@@ -84,24 +88,24 @@ class HashSetStriped : public HashSetBase<T> {
   [[nodiscard]] bool Contains(T elem) final {
     size_t bucket = std::hash<T>()(elem) % table_.size();
 
-    std::scoped_lock lock(mutexes_[bucket % mutexes_.size()]);
+    std::scoped_lock<std::mutex> lock(*mutexes_[bucket % mutexes_.size()]);
     return std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
            table_[bucket].end();
   }
 
   [[nodiscard]] size_t Size() const final {
-    std::unique_lock lock(size_mutex_);
-    clear_to_read_size_.wait(lock, [&] { return modifiers_.load() == 0; });
+    std::unique_lock<std::mutex> lock(size_mutex_);
+    clear_to_read_size_.wait(lock, [this] { return modifiers_.load() == 0; });
     return set_size_.load();
   }
 
  private:
-  std::vector<std::vector<T> > table_;
-  std::vector<std::mutex> mutexes_;
+  std::vector<std::vector<T>> table_;
+  std::vector<std::unique_ptr<std::mutex>> mutexes_;
 
   std::atomic<size_t> set_size_;
-  std::mutex size_mutex_;
-  std::condition_variable clear_to_read_size_;
+  mutable std::mutex size_mutex_;
+  mutable std::condition_variable clear_to_read_size_;
 
   std::size_t capacity_;
   std::atomic<bool> resizing_;
@@ -111,29 +115,30 @@ class HashSetStriped : public HashSetBase<T> {
   std::atomic<size_t> modifiers_;
 
   void Resize() {
-    std::unique_lock lock(size_mutex_);
-    clear_to_read_size_.wait(lock, [&] { return modifiers_.load() == 1; });
-
     for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
     }
 
+    size_t new_capacity = capacity_ * 2;
     std::vector<T> buffer{};
     for (size_t i = 0; i < capacity_; i++) {
       for (size_t j = 0; j < table_[i].size(); j++) {
-        int bucket = std::hash<T>()(table_[i][j]) % capacity_;
+        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
         if (bucket == i) {
           buffer.push_back(table_[i][j]);
         } else {
           table_[bucket].push_back(table_[i][j]);
         }
       }
+      table_[i].clear();
+
+      for (size_t j = 0; j < buffer.size(); j++) {
+        table_[i].push_back(buffer[j]);
+      }
       buffer.clear();
     }
 
-    capacity_ = capacity_ * 2;
-    resizing_.store(false);
-    clear_to_modify_.notify_all();
+    capacity_ = new_capacity;
   }
 };
 

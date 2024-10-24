@@ -1,8 +1,10 @@
 #ifndef HASH_SET_COARSE_GRAINED_H
 #define HASH_SET_COARSE_GRAINED_H
 
+#include <algorithm>
 #include <functional>
 #include <mutex>
+#include <vector>
 
 #include "src/hash_set_base.h"
 
@@ -10,7 +12,7 @@ template <typename T>
 class HashSetCoarseGrained : public HashSetBase<T> {
  public:
   explicit HashSetCoarseGrained(size_t initial_capacity)
-      : mutex_(), capacity_(initial_capacity) {
+      : capacity_{initial_capacity} {
     set_size_ = 0;
     for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
@@ -18,7 +20,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   }
 
   bool Add(T elem) final {
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock<std::mutex> lock(mutex_);
     if (set_size_ == capacity_) {
       Resize();
     }
@@ -36,7 +38,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   }
 
   bool Remove(T elem) final {
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock<std::mutex> lock(mutex_);
 
     size_t bucket = std::hash<T>()(elem) % capacity_;
 
@@ -54,7 +56,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   }
 
   [[nodiscard]] bool Contains(T elem) final {
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock<std::mutex> lock(mutex_);
 
     size_t bucket = std::hash<T>()(elem) % capacity_;
     return std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
@@ -62,7 +64,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   }
 
   [[nodiscard]] size_t Size() const final {
-    std::scoped_lock lock(mutex_);
+    std::scoped_lock<std::mutex> lock(mutex_);
     return set_size_;
   }
 
@@ -70,29 +72,33 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   std::vector<std::vector<T> > table_;
   size_t set_size_;
   size_t capacity_;
-  std::mutex& mutex_;
+  mutable std::mutex mutex_;
 
   void Resize() {
-    std::scoped_lock lock(mutex_);
-
     for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
     }
 
+    size_t new_capacity = capacity_ * 2;
     std::vector<T> buffer{};
     for (size_t i = 0; i < capacity_; i++) {
       for (size_t j = 0; j < table_[i].size(); j++) {
-        int bucket = std::hash<T>()(table_[i][j]) % capacity_;
+        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
         if (bucket == i) {
           buffer.push_back(table_[i][j]);
         } else {
           table_[bucket].push_back(table_[i][j]);
         }
       }
+      table_[i].clear();
+
+      for (size_t j = 0; j < buffer.size(); j++) {
+        table_[i].push_back(buffer[j]);
+      }
       buffer.clear();
     }
 
-    capacity_ = capacity_ * 2;
+    capacity_ = new_capacity;
   }
 };
 

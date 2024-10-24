@@ -1,8 +1,9 @@
 #ifndef HASH_SET_SEQUENTIAL_H
 #define HASH_SET_SEQUENTIAL_H
 
-#include <cassert>
+#include <algorithm>
 #include <functional>
+#include <vector>
 
 #include "src/hash_set_base.h"
 
@@ -10,7 +11,7 @@ template <typename T>
 class HashSetSequential : public HashSetBase<T> {
  public:
   explicit HashSetSequential(size_t initial_capacity)
-      : capacity_(initial_capacity) {
+      : capacity_{initial_capacity} {
     set_size_ = 0;
     for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
@@ -68,20 +69,26 @@ class HashSetSequential : public HashSetBase<T> {
       table_.push_back(std::vector<T>());
     }
 
+    size_t new_capacity = capacity_ * 2;
     std::vector<T> buffer{};
     for (size_t i = 0; i < capacity_; i++) {
       for (size_t j = 0; j < table_[i].size(); j++) {
-        int bucket = std::hash<T>()(table_[i][j]) % capacity_;
+        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
         if (bucket == i) {
           buffer.push_back(table_[i][j]);
         } else {
           table_[bucket].push_back(table_[i][j]);
         }
       }
+      table_[i].clear();
+
+      for (size_t j = 0; j < buffer.size(); j++) {
+        table_[i].push_back(buffer[j]);
+      }
       buffer.clear();
     }
 
-    capacity_ = capacity_ * 2;
+    capacity_ = new_capacity;
   }
 };
 
