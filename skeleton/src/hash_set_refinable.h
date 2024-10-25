@@ -22,22 +22,23 @@ class HashSetRefinable : public HashSetBase<T> {
   }
 
   bool Add(T elem) final {
+    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
+    resize_cv_.wait(resize_lock);
+
+    modifiers_.fetch_add(1);
     if (!resizing_.load() && set_size_.load() >= capacity_.load()) {
+      modifiers_.fetch_sub(1);
       Resize();
+      modifiers_.fetch_add(1);
     }
 
     size_t capacity_snapshot = capacity_.load();
     size_t bucket = std::hash<T>()(elem) % capacity_snapshot;
     bool found = false;
 
-    std::unique_lock<std::mutex> mutex_list_lock(mutexes_list_mutex_);
-    std::mutex& mutex = *mutexes_[bucket];
-    mutex_list_lock.unlock();
-
-    std::unique_lock<std::mutex> lock(mutex);
+    std::unique_lock<std::mutex> lock(*mutexes_[bucket]);
     if (capacity_snapshot != capacity_.load()) {
-      lock.unlock();
-      return Add(elem);
+      bucket = std::hash<T>()(elem) % capacity_.load();
     }
 
     found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
@@ -48,23 +49,25 @@ class HashSetRefinable : public HashSetBase<T> {
       set_size_.fetch_add(1);
     }
     lock.unlock();
+    if (modifiers_.fetch_sub(1) == 1) {
+      modification_cv_.notify_all();
+    }
 
     return !found;
   }
 
   bool Remove(T elem) final {
+    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
+    resize_cv_.wait(resize_lock);
+
+    modifiers_.fetch_add(1);
     size_t capacity_snapshot = capacity_.load();
     size_t bucket = std::hash<T>()(elem) % capacity_snapshot;
     bool found = false;
 
-    std::unique_lock<std::mutex> mutex_list_lock(mutexes_list_mutex_);
-    std::mutex& mutex = *mutexes_[bucket];
-    mutex_list_lock.unlock();
-
-    std::unique_lock<std::mutex> lock(mutex);
+    std::unique_lock<std::mutex> lock(*mutexes_[bucket]);
     if (capacity_snapshot != capacity_.load()) {
-      lock.unlock();
-      return Remove(elem);
+      bucket = std::hash<T>()(elem) % capacity_.load();
     }
 
     found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
@@ -77,23 +80,24 @@ class HashSetRefinable : public HashSetBase<T> {
       set_size_.fetch_sub(1);
     }
     lock.unlock();
+    if (modifiers_.fetch_sub(1) == 1) {
+      modification_cv_.notify_all();
+    }
 
     return found;
   }
 
   [[nodiscard]] bool Contains(T elem) final {
+    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
+    resize_cv_.wait(resize_lock);
+
     size_t capacity_snapshot = capacity_.load();
     size_t bucket = std::hash<T>()(elem) % capacity_snapshot;
     bool found = false;
 
-    std::unique_lock<std::mutex> mutex_list_lock(mutexes_list_mutex_);
-    std::mutex& mutex = *mutexes_[bucket];
-    mutex_list_lock.unlock();
-
-    std::unique_lock<std::mutex> lock(mutex);
+    std::unique_lock<std::mutex> lock(*mutexes_[bucket]);
     if (capacity_snapshot != capacity_.load()) {
-      lock.unlock();
-      return Contains(elem);
+      bucket = std::hash<T>()(elem) % capacity_.load();
     }
 
     found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
@@ -104,16 +108,13 @@ class HashSetRefinable : public HashSetBase<T> {
   }
 
   [[nodiscard]] size_t Size() const final {
-    std::scoped_lock<std::mutex> lock(resize_mutex_);
-    std::scoped_lock<std::mutex> mutex_list_lock(mutexes_list_mutex_);
-
-    for (size_t i = 0; i < capacity_.load(); i++) {
+    for (size_t i = 0; i < mutexes_.size(); i++) {
       mutexes_[i]->lock();
     }
 
     size_t size = set_size_.load();
 
-    for (size_t i = 0; i < capacity_.load(); i++) {
+    for (size_t i = 0; i < mutexes_.size(); i++) {
       mutexes_[i]->unlock();
     }
 
@@ -130,22 +131,23 @@ class HashSetRefinable : public HashSetBase<T> {
 
   std::atomic<bool> resizing_{false};
   mutable std::mutex resize_mutex_;
+  std::condition_variable resize_cv_;
 
-  mutable std::mutex mutexes_list_mutex_;
+  std::atomic<std::size_t> modifiers_;
+  std::condition_variable modification_cv_;
+  std::mutex modification_mutex_;
 
   void Resize() {
-    std::scoped_lock<std::mutex> resize_lock(resize_mutex_);
+    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
 
     if (set_size_.load() < capacity_.load()) {
       return;
     }
 
-    resizing_.store(true);
+    std::unique_lock<std::mutex> lock(modification_mutex_);
+    modification_cv_.wait(lock, [this] { return modifiers_.load() == 0; });
 
-    std::scoped_lock<std::mutex> mutex_list_lock(mutexes_list_mutex_);
-    for (size_t i = 0; i < capacity_.load(); i++) {
-      mutexes_[i]->lock();
-    }
+    resizing_.store(true);
 
     for (size_t i = 0; i < capacity_.load(); i++) {
       table_.push_back(std::vector<T>());
@@ -173,11 +175,9 @@ class HashSetRefinable : public HashSetBase<T> {
 
     capacity_.store(new_capacity);
 
-    for (size_t i = 0; i < new_capacity / 2; i++) {
-      mutexes_[i]->unlock();
-    }
-
     resizing_.store(false);
+    resize_lock.unlock();
+    resize_cv_.notify_all();
   }
 };
 
