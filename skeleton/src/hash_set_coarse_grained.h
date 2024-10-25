@@ -21,7 +21,7 @@ class HashSetCoarseGrained : public HashSetBase<T> {
 
   bool Add(T elem) final {
     std::scoped_lock<std::mutex> lock(mutex_);
-    if (set_size_ == capacity_) {
+    if (ResizePolicy()) {
       Resize();
     }
 
@@ -73,6 +73,10 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   size_t set_size_;
   size_t capacity_;
   mutable std::mutex mutex_;
+
+  bool ResizePolicy() const {
+    return set_size_ * 4 >= capacity_;
+  }
 
   void Resize() {
     for (size_t i = 0; i < capacity_; i++) {

@@ -19,7 +19,7 @@ class HashSetSequential : public HashSetBase<T> {
   }
 
   bool Add(T elem) final {
-    if (set_size_ == capacity_) {
+    if (ResizePolicy()) {
       Resize();
     }
 
@@ -63,6 +63,10 @@ class HashSetSequential : public HashSetBase<T> {
   std::vector<std::vector<T> > table_;
   size_t set_size_;
   size_t capacity_;
+
+  bool ResizePolicy() const {
+    return set_size_ >= capacity_;
+  }
 
   void Resize() {
     for (size_t i = 0; i < capacity_; i++) {
