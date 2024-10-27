@@ -12,8 +12,9 @@
 
 template <typename T>
 class HashSetStriped : public HashSetBase<T> {
-public:
-  explicit HashSetStriped(size_t initial_capacity) : capacity_{initial_capacity} {
+ public:
+  explicit HashSetStriped(size_t initial_capacity)
+      : capacity_{initial_capacity} {
     for (size_t i = 0; i < capacity_; i++) {
       table_.push_back(std::vector<T>());
       mutexes_.push_back(std::make_unique<std::mutex>());
@@ -24,8 +25,8 @@ public:
     std::unique_lock<std::mutex> resize_lock(resize_mutex_);
     if (ResizePolicy()) {
       std::unique_lock<std::mutex> modification_lock(modification_mutex_);
-      resize_cv_.wait(modification_lock, [this] { return modifiers_.load() == 0; });
-      modification_lock.unlock();
+      resize_cv_.wait(modification_lock,
+                      [this] { return modifiers_.load() == 0; });
 
       Resize();
     }
@@ -45,8 +46,9 @@ public:
     }
     lock.unlock();
 
-    modifiers_.fetch_sub(1);
-    resize_cv_.notify_all();
+    if (modifiers_.fetch_sub(1) == 1) {
+      resize_cv_.notify_all();
+    }
 
     return !found;
   }
@@ -71,8 +73,9 @@ public:
     }
     lock.unlock();
 
-    modifiers_.fetch_sub(1);
-    resize_cv_.notify_all();
+    if (modifiers_.fetch_sub(1) == 1) {
+      resize_cv_.notify_all();
+    }
 
     return found;
   }
@@ -90,17 +93,14 @@ public:
             table_[bucket].end();
     lock.unlock();
 
-    modifiers_.fetch_sub(1);
-    resize_cv_.notify_all();
+    if (modifiers_.fetch_sub(1) == 1) {
+      resize_cv_.notify_all();
+    }
 
     return found;
   }
 
-  [[nodiscard]] size_t Size() const final {
-    std::unique_lock<std::mutex> modification_lock(modification_mutex_);
-    resize_cv_.wait(modification_lock, [this] { return modifiers_.load() == 0; });
-    return set_size_.load();
-  }
+  [[nodiscard]] size_t Size() const final { return set_size_.load(); }
 
  private:
   std::vector<std::vector<T>> table_;
@@ -116,32 +116,31 @@ public:
   mutable std::mutex modification_mutex_;
   std::atomic<size_t> modifiers_{0};
 
-  bool ResizePolicy() const {
-    return set_size_.load() * 4 >= capacity_;
-  }
+  bool ResizePolicy() const { return set_size_.load() * 4 >= capacity_; }
 
   void Resize() {
-    for (size_t i = 0; i < capacity_; i++) {
-      table_.push_back(std::vector<T>());
-    }
-
     size_t new_capacity = capacity_ * 2;
-    std::vector<T> buffer{};
+    table_.resize(new_capacity);
+
+    std::vector<T> buffer;
     for (size_t i = 0; i < capacity_; i++) {
-      for (size_t j = 0; j < table_[i].size(); j++) {
-        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
+      buffer.clear();
+      buffer.reserve(table_[i].size());
+
+      for (const auto& item : table_[i]) {
+        size_t bucket = std::hash<T>()(item) % new_capacity;
         if (bucket == i) {
-          buffer.push_back(table_[i][j]);
+          buffer.push_back(item);
         } else {
-          table_[bucket].push_back(table_[i][j]);
+          table_[bucket].push_back(item);
         }
       }
-      table_[i].clear();
 
-      for (size_t j = 0; j < buffer.size(); j++) {
-        table_[i].push_back(buffer[j]);
+      if (!buffer.empty()) {
+        table_[i] = std::move(buffer);
+      } else {
+        table_[i].clear();
       }
-      buffer.clear();
     }
 
     capacity_ = new_capacity;

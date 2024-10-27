@@ -64,32 +64,31 @@ class HashSetSequential : public HashSetBase<T> {
   size_t set_size_;
   size_t capacity_;
 
-  bool ResizePolicy() const {
-    return set_size_ >= capacity_;
-  }
+  bool ResizePolicy() const { return set_size_ >= capacity_; }
 
   void Resize() {
-    for (size_t i = 0; i < capacity_; i++) {
-      table_.push_back(std::vector<T>());
-    }
-
     size_t new_capacity = capacity_ * 2;
-    std::vector<T> buffer{};
+    table_.resize(new_capacity);
+
+    std::vector<T> buffer;
     for (size_t i = 0; i < capacity_; i++) {
-      for (size_t j = 0; j < table_[i].size(); j++) {
-        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
+      buffer.clear();
+      buffer.reserve(table_[i].size());
+
+      for (const auto& item : table_[i]) {
+        size_t bucket = std::hash<T>()(item) % new_capacity;
         if (bucket == i) {
-          buffer.push_back(table_[i][j]);
+          buffer.push_back(item);
         } else {
-          table_[bucket].push_back(table_[i][j]);
+          table_[bucket].push_back(item);
         }
       }
-      table_[i].clear();
 
-      for (size_t j = 0; j < buffer.size(); j++) {
-        table_[i].push_back(buffer[j]);
+      if (!buffer.empty()) {
+        table_[i] = std::move(buffer);
+      } else {
+        table_[i].clear();
       }
-      buffer.clear();
     }
 
     capacity_ = new_capacity;
