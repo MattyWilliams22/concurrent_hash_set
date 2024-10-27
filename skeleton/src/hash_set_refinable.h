@@ -15,30 +15,19 @@ class HashSetRefinable : public HashSetBase<T> {
  public:
   explicit HashSetRefinable(size_t initial_capacity)
       : capacity_{initial_capacity} {
-    for (size_t i = 0; i < capacity_; i++) {
+    for (size_t i = 0; i < capacity_.load(); i++) {
       table_.push_back(std::vector<T>());
       mutexes_.push_back(std::make_unique<std::mutex>());
     }
   }
 
   bool Add(T elem) final {
-    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
-    if (ResizePolicy()) {
-      std::unique_lock<std::mutex> modification_lock(modification_mutex_);
-      resize_cv_.wait(modification_lock,
-                      [this] { return modifiers_.load() == 0; });
+    size_t hash = std::hash<T>()(elem);
 
-      Resize();
-    }
-    modifiers_.fetch_add(1);
-    resize_lock.unlock();
-
-    size_t bucket = std::hash<T>()(elem) % capacity_;
-    bool found = false;
-
-    std::unique_lock<std::mutex> lock(*mutexes_[bucket]);
-    found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
-            table_[bucket].end();
+    std::unique_lock<std::mutex> lock(*mutexes_[hash % mutexes_.size()]);
+    size_t bucket = hash % capacity_.load();
+    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
+                           elem) != table_[bucket].end();
 
     if (!found) {
       table_[bucket].push_back(elem);
@@ -46,24 +35,20 @@ class HashSetRefinable : public HashSetBase<T> {
     }
     lock.unlock();
 
-    if (modifiers_.fetch_sub(1) == 1) {
-      resize_cv_.notify_all();
+    if (ResizePolicy()) {
+      Resize();
     }
 
     return !found;
   }
 
   bool Remove(T elem) final {
-    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
-    modifiers_.fetch_add(1);
-    resize_lock.unlock();
+    size_t hash = std::hash<T>()(elem);
 
-    size_t bucket = std::hash<T>()(elem) % capacity_;
-    bool found = false;
-
-    std::unique_lock<std::mutex> lock(*mutexes_[bucket]);
-    found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
-            table_[bucket].end();
+    std::unique_lock<std::mutex> lock(*mutexes_[hash % mutexes_.size()]);
+    size_t bucket = hash % capacity_.load();
+    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
+                           elem) != table_[bucket].end();
 
     if (found) {
       table_[bucket].erase(
@@ -73,29 +58,17 @@ class HashSetRefinable : public HashSetBase<T> {
     }
     lock.unlock();
 
-    if (modifiers_.fetch_sub(1) == 1) {
-      resize_cv_.notify_all();
-    }
-
     return found;
   }
 
   [[nodiscard]] bool Contains(T elem) final {
-    std::unique_lock<std::mutex> resize_lock(resize_mutex_);
-    modifiers_.fetch_add(1);
-    resize_lock.unlock();
+    size_t hash = std::hash<T>()(elem);
 
-    size_t bucket = std::hash<T>()(elem) % capacity_;
-    bool found = false;
-
-    std::unique_lock<std::mutex> lock(*mutexes_[bucket]);
-    found = std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
-            table_[bucket].end();
+    std::unique_lock<std::mutex> lock(*mutexes_[hash % mutexes_.size()]);
+    size_t bucket = hash % capacity_.load();
+    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
+                           elem) != table_[bucket].end();
     lock.unlock();
-
-    if (modifiers_.fetch_sub(1) == 1) {
-      resize_cv_.notify_all();
-    }
 
     return found;
   }
@@ -108,47 +81,50 @@ class HashSetRefinable : public HashSetBase<T> {
 
   std::atomic<size_t> set_size_{0};
 
-  size_t capacity_;
+  std::atomic<size_t> capacity_;
 
-  mutable std::mutex resize_mutex_;
-  mutable std::condition_variable resize_cv_;
-
-  mutable std::mutex modification_mutex_;
-  std::atomic<size_t> modifiers_{0};
-
-  bool ResizePolicy() const { return set_size_.load() * 4 >= capacity_; }
+  bool ResizePolicy() const { return set_size_.load() >= 4 * capacity_.load(); }
 
   void Resize() {
-    size_t new_capacity = capacity_ * 2;
-    table_.resize(new_capacity);
-    mutexes_.resize(new_capacity);
-
-    for (size_t i = capacity_; i < new_capacity; i++) {
-      mutexes_[i] = std::make_unique<std::mutex>();
+    for (size_t i = 0; i < mutexes_.size(); i++) {
+      mutexes_[i]->lock();
     }
 
-    std::vector<T> buffer;
-    for (size_t i = 0; i < capacity_; i++) {
-      buffer.clear();
-      buffer.reserve(table_[i].size());
+    if (!ResizePolicy()) {
+      for (size_t i = 0; i < mutexes_.size(); i++) {
+        mutexes_[i]->unlock();
+      }
+      return;
+    }
 
-      for (const auto& item : table_[i]) {
-        size_t bucket = std::hash<T>()(item) % new_capacity;
+    for (size_t i = 0; i < capacity_.load(); i++) {
+      table_.push_back(std::vector<T>());
+    }
+
+    size_t new_capacity = capacity_.load() * 2;
+    std::vector<T> buffer{};
+    for (size_t i = 0; i < capacity_.load(); i++) {
+      for (size_t j = 0; j < table_[i].size(); j++) {
+        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
         if (bucket == i) {
-          buffer.push_back(item);
+          buffer.push_back(table_[i][j]);
         } else {
-          table_[bucket].push_back(item);
+          table_[bucket].push_back(table_[i][j]);
         }
       }
+      table_[i].clear();
 
-      if (!buffer.empty()) {
-        table_[i] = std::move(buffer);
-      } else {
-        table_[i].clear();
+      for (size_t j = 0; j < buffer.size(); j++) {
+        table_[i].push_back(buffer[j]);
       }
+      buffer.clear();
     }
 
-    capacity_ = new_capacity;
+    capacity_.store(new_capacity);
+
+    for (size_t i = 0; i < mutexes_.size(); i++) {
+      mutexes_[i]->unlock();
+    }
   }
 };
 

@@ -74,31 +74,30 @@ class HashSetCoarseGrained : public HashSetBase<T> {
   size_t capacity_;
   mutable std::mutex mutex_;
 
-  bool ResizePolicy() const { return set_size_ * 4 >= capacity_; }
+  bool ResizePolicy() const { return set_size_ >= 4 * capacity_; }
 
   void Resize() {
-    size_t new_capacity = capacity_ * 2;
-    table_.resize(new_capacity);
-
-    std::vector<T> buffer;
     for (size_t i = 0; i < capacity_; i++) {
-      buffer.clear();
-      buffer.reserve(table_[i].size());
+      table_.push_back(std::vector<T>());
+    }
 
-      for (const auto& item : table_[i]) {
-        size_t bucket = std::hash<T>()(item) % new_capacity;
+    size_t new_capacity = capacity_ * 2;
+    std::vector<T> buffer{};
+    for (size_t i = 0; i < capacity_; i++) {
+      for (size_t j = 0; j < table_[i].size(); j++) {
+        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
         if (bucket == i) {
-          buffer.push_back(item);
+          buffer.push_back(table_[i][j]);
         } else {
-          table_[bucket].push_back(item);
+          table_[bucket].push_back(table_[i][j]);
         }
       }
+      table_[i].clear();
 
-      if (!buffer.empty()) {
-        table_[i] = std::move(buffer);
-      } else {
-        table_[i].clear();
+      for (size_t j = 0; j < buffer.size(); j++) {
+        table_[i].push_back(buffer[j]);
       }
+      buffer.clear();
     }
 
     capacity_ = new_capacity;
