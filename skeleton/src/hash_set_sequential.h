@@ -1,7 +1,6 @@
 #ifndef HASH_SET_SEQUENTIAL_H
 #define HASH_SET_SEQUENTIAL_H
 
-#include <algorithm>
 #include <functional>
 #include <vector>
 
@@ -10,88 +9,80 @@
 template <typename T>
 class HashSetSequential : public HashSetBase<T> {
  public:
-  explicit HashSetSequential(size_t initial_capacity)
-      : capacity_{initial_capacity} {
-    set_size_ = 0;
-    for (size_t i = 0; i < capacity_; i++) {
-      table_.push_back(std::vector<T>());
-    }
-  }
+  explicit HashSetSequential(size_t capacity) : table_(capacity) {}
 
   bool Add(T elem) final {
-    if (ResizePolicy()) {
-      Resize();
+    bool result = false;
+    size_t bucket_idx = std::hash<T>()(elem) % table_.size();
+
+    // Attempts to insert into bucket checking for duplicates
+    result = FindOrPushBack(table_[bucket_idx], elem);
+
+    result ? size_++ : size_;
+
+    if (policy()) {
+      resize();
     }
 
-    size_t bucket = std::hash<T>()(elem) % capacity_;
-    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
-                           elem) != table_[bucket].end();
-
-    if (!found) {
-      table_[bucket].push_back(elem);
-      set_size_++;
-    }
-
-    return !found;
+    return result;
   }
 
   bool Remove(T elem) final {
-    size_t bucket = std::hash<T>()(elem) % capacity_;
+    bool result = false;
+    size_t bucket_idx = std::hash<T>()(elem) % table_.size();
 
-    bool found = std::find(table_[bucket].begin(), table_[bucket].end(),
-                           elem) != table_[bucket].end();
+    // Attempts to remove from bucket checking for duplicates
+    result = FindAndErase(table_[bucket_idx], elem);
 
-    if (found) {
-      table_[bucket].erase(
-          std::remove(table_[bucket].begin(), table_[bucket].end(), elem),
-          table_[bucket].end());
-      set_size_--;
-    }
+    result ? size_-- : size_;
 
-    return found;
+    return result;
   }
 
   [[nodiscard]] bool Contains(T elem) final {
-    size_t bucket = std::hash<T>()(elem) % capacity_;
-    return std::find(table_[bucket].begin(), table_[bucket].end(), elem) !=
-           table_[bucket].end();
+    size_t bucket_idx = std::hash<T>()(elem) % table_.size();
+    std::vector<T>& list = table_[bucket_idx];
+
+    return std::find(list.begin(), list.end(), elem) != list.end();
   }
 
-  [[nodiscard]] size_t Size() const final { return set_size_; }
+  [[nodiscard]] size_t Size() const final { return size_; }
 
  private:
-  std::vector<std::vector<T> > table_;
-  size_t set_size_;
-  size_t capacity_;
+  std::vector<std::vector<T>> table_;
+  size_t size_ = 0;
 
-  bool ResizePolicy() const { return set_size_ >= 4 * capacity_; }
-
-  void Resize() {
-    for (size_t i = 0; i < capacity_; i++) {
-      table_.push_back(std::vector<T>());
+  bool FindOrPushBack(std::vector<T>& list, T& elem) {
+    if (std::find(list.begin(), list.end(), elem) == list.end()) {
+      list.push_back(elem);
+      return true;
     }
-
-    size_t new_capacity = capacity_ * 2;
-    std::vector<T> buffer{};
-    for (size_t i = 0; i < capacity_; i++) {
-      for (size_t j = 0; j < table_[i].size(); j++) {
-        size_t bucket = std::hash<T>()(table_[i][j]) % new_capacity;
-        if (bucket == i) {
-          buffer.push_back(table_[i][j]);
-        } else {
-          table_[bucket].push_back(table_[i][j]);
-        }
-      }
-      table_[i].clear();
-
-      for (size_t j = 0; j < buffer.size(); j++) {
-        table_[i].push_back(buffer[j]);
-      }
-      buffer.clear();
-    }
-
-    capacity_ = new_capacity;
+    return false;
   }
+
+  bool FindAndErase(std::vector<T>& list, T& elem) {
+    auto it = std::find(list.begin(), list.end(), elem);
+    if (it != list.end()) {
+      list.erase(it);
+      return true;
+    }
+    return false;
+  }
+
+  void resize() {
+    std::vector<std::vector<T>> old_table = table_;
+    size_t const new_capacity = old_table.size() * 2;
+    table_ = std::vector<std::vector<T>>(new_capacity);
+
+    // reinserting all elems from scratch due to capacity change
+    for (std::vector<T>& bucket : old_table) {
+      for (T& elem : bucket) {
+        table_[std::hash<T>()(elem) % table_.size()].push_back(elem);
+      }
+    }
+  }
+
+  bool policy() { return size_ / table_.size() > 4; }
 };
 
 #endif  // HASH_SET_SEQUENTIAL_H
