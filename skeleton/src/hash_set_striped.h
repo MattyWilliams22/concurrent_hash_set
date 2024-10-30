@@ -17,6 +17,7 @@ class HashSetStriped : public HashSetBase<T> {
         capacity_(capacity),
         num_of_locks_(capacity) {}
 
+
   bool Add(T elem) final {
     bool result = false;
     // Due to us always doubling the capacity if we use num_locks (same as
@@ -37,8 +38,8 @@ class HashSetStriped : public HashSetBase<T> {
     // lock we previously released.
     std::unique_lock<std::mutex> lock(locks_[lock_idx]);
 
-    size_t curr_capacity = capacity_.load();
-    size_t bucket_idx = std::hash<T>()(elem) % curr_capacity;
+    size_t current_capacity = capacity_.load();
+    size_t bucket_idx = std::hash<T>()(elem) % current_capacity;
 
     result = FindOrPushBack(table_[bucket_idx], elem);
 
@@ -47,10 +48,18 @@ class HashSetStriped : public HashSetBase<T> {
     // at the same time, the atomic prevents write-write races.
     if (result) size_.fetch_add(1);
 
-    if (policy(curr_capacity)) {
+    //  return if we didn't manage to add no need to resize
+    if (!result) {
+      return false;
+    }
+
+    if (policy(current_capacity)) {
       // unlocking here at before resize
       lock.unlock();
-      resize(curr_capacity);
+      // we must pass capacity here to avoid a double resize as if we get it in the
+      // function after it is called we could have been pre-emted before we are able
+      // to get the capacity, then another thread resized and then we resized.
+      resize(current_capacity);
       return result;
     }
 
