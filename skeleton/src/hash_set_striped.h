@@ -17,7 +17,6 @@ class HashSetStriped : public HashSetBase<T> {
         capacity_(capacity),
         num_of_locks_(capacity) {}
 
-
   bool Add(T elem) final {
     bool result = false;
     // Due to us always doubling the capacity if we use num_locks (same as
@@ -56,9 +55,10 @@ class HashSetStriped : public HashSetBase<T> {
     if (policy(current_capacity)) {
       // unlocking here at before resize
       lock.unlock();
-      // we must pass capacity here to avoid a double resize as if we get it in the
-      // function after it is called we could have been pre-emted before we are able
-      // to get the capacity, then another thread resized and then we resized.
+      // we must pass capacity here to avoid a double resize as if we get it in
+      // the function after it is called we could have been pre-emted before we
+      // are able to get the capacity, then another thread resized and then we
+      // resized.
       resize(current_capacity);
       return result;
     }
