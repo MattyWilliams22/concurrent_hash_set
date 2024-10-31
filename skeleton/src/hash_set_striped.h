@@ -11,6 +11,7 @@
 template <typename T>
 class HashSetStriped : public HashSetBase<T> {
  public:
+  // Sets up a separate lock for each bucket.
   explicit HashSetStriped(size_t capacity)
       : table_(capacity),
         locks_(capacity),
@@ -19,51 +20,51 @@ class HashSetStriped : public HashSetBase<T> {
 
   bool Add(T elem) final {
     bool result = false;
-    // Due to us always doubling the capacity if we use num_locks (same as
-    // initial capacity) to find lock_idx then only load capacity after the lock
-    // if saves us doing check such as: if (curr_capacity != capacity_.load()) {
-    // lock.unlock();
-    // return this->Add(elem);
-    //}
-    // after acquiring the lock as while I'm holding the bucket lock it would be
-    // impossible for another thread to have resized as they would be blocked.
+
+    // Determine the index of the lock for the current element based on its
+    // hash.
     size_t lock_idx = std::hash<T>()(elem) % num_of_locks_;
 
-    // This time due to fact there are individual locks for each buck we have no
-    // way of knowing in resize which lock is already held, it might not even be
-    // a thread holding it that is able to resize first hence to prevent
-    // deadlocking we must use a unique lock to release the lock early then in
-    // resize we attempt to lock the locks in idx order everytime. Including the
-    // lock we previously released.
+    // Using unique_lock here allows for more control over the lock, which is
+    // necessary because we may need to unlock it temporarily during a resize
+    // operation. Unlike scoped_lock, unique_lock allows manual unlocking and
+    // relocking, which is ideal for managing the lock lifecycle within this
+    // more complex operation.
     std::unique_lock<std::mutex> lock(locks_[lock_idx]);
 
+    // Load the current capacity to ensure we're using a consistent value
+    // throughout the operation, even if a resize is triggered.
     size_t current_capacity = capacity_.load();
     size_t bucket_idx = std::hash<T>()(elem) % current_capacity;
 
+    // Attempt to insert the element into the appropriate bucket.
+    // If the element is already present, the function will return false.
     result = FindOrPushBack(table_[bucket_idx], elem);
 
-    // Size is atomic here for same reasons as in course gained (due to size
-    // func) but also due to multiple threads adding and removing from hash set
-    // at the same time, the atomic prevents write-write races.
+    // If the element was added, atomically increment the size.
     if (result) size_.fetch_add(1);
 
-    //  return if we didn't manage to add no need to resize
+    // If we failed to add the element, no further work is needed, so return
+    // early.
     if (!result) {
       return false;
     }
 
+    // Check if resizing is needed based on the load factor policy.
+    // If resizing is required, temporarily unlock here to avoid holding locks
+    // during resize.
     if (policy(current_capacity)) {
-      // unlocking here at before resize
+      // Release the lock before resizing to prevent deadlocks.
       lock.unlock();
-      // we must pass capacity here to avoid a double resize as if we get it in
-      // the function after it is called we could have been pre-emted before we
-      // are able to get the capacity, then another thread resized and then we
-      // resized.
+
+      // Calling resize with the current capacity to ensure no redundant resizes
+      // occur.
       resize(current_capacity);
-      return result;
+
+      return result;  // Return the result of the addition operation.
     }
 
-    // auto unique lock unlock here via RAII
+    // The unique_lock automatically unlocks when it goes out of scope (RAII).
     return result;
   }
 
@@ -71,13 +72,22 @@ class HashSetStriped : public HashSetBase<T> {
     bool result = false;
     size_t lock_idx = std::hash<T>()(elem) % num_of_locks_;
 
-    std::unique_lock<std::mutex> lock(locks_[lock_idx]);
+    // A scoped_lock is used here to ensure exclusive access to the bucket
+    // where the element may be stored. scoped_lock is ideal in this case
+    // as it locks the mutex immediately upon construction and releases it
+    // automatically when it goes out of scope, ensuring thread-safe access
+    // for this simple operation.
+    std::scoped_lock lock(locks_[lock_idx]);
 
+    // Compute the index of the bucket in the table where the element should
+    // reside.
     size_t curr_capacity = capacity_.load();
     size_t bucket_idx = std::hash<T>()(elem) % curr_capacity;
 
+    // Attempt to find and erase the element from the bucket.
     result = FindAndErase(table_[bucket_idx], elem);
 
+    // If the element was successfully removed, decrement the size atomically.
     if (result) size_.fetch_sub(1);
 
     return result;
@@ -86,28 +96,45 @@ class HashSetStriped : public HashSetBase<T> {
   [[nodiscard]] bool Contains(T elem) final {
     size_t lock_idx = std::hash<T>()(elem) % num_of_locks_;
 
-    std::unique_lock<std::mutex> lock(locks_[lock_idx]);
+    // Here we use scoped_lock to ensure that the thread has exclusive access
+    // to the bucket while checking if the element exists. Because Contains is
+    // a read-only operation, we only need the lock for the duration of this
+    // simple, non-modifying access, making scoped_lock an efficient choice.
+    std::scoped_lock lock(locks_[lock_idx]);
 
+    // Determine the appropriate bucket index for the given element.
     size_t curr_capacity = capacity_.load();
     size_t bucket_idx = std::hash<T>()(elem) % curr_capacity;
 
+    // Check if the element exists in the bucket by searching through it.
     std::vector<T>& list = table_[bucket_idx];
     return std::find(list.begin(), list.end(), elem) != list.end();
   }
 
+  // Returns the current number of elements in the hash set.
+  // Uses an atomic load to ensure a thread-safe read.
   [[nodiscard]] size_t Size() const final { return size_.load(); }
 
  private:
-  std::vector<std::vector<T>> table_;
-  std::vector<std::mutex> locks_;
-  std::atomic<size_t> size_{0};
-  std::atomic<size_t> capacity_;
-  size_t const num_of_locks_;
+  std::vector<std::vector<T>>
+      table_;  // Hash table represented as a vector of buckets.
+  std::vector<std::mutex>
+      locks_;  // Array of locks for striped locking of individual buckets.
+  std::atomic<size_t> size_{
+      0};  // Atomic size to handle concurrent updates safely.
+  std::atomic<size_t>
+      capacity_;  // Atomic capacity to manage concurrent resizing.
+  size_t const
+      num_of_locks_;  // Fixed number of locks used for striped locking.
 
+  // Checks if resizing is needed based on the current load factor.
+  // Uses atomic size access to ensure consistent reads.
   bool policy(size_t const current_capacity) {
     return size_.load() / current_capacity > 4;
   }
 
+  // Searches for an element in the bucket; if not found, adds it.
+  // Returns true if the element was added.
   bool FindOrPushBack(std::vector<T>& list, T& elem) {
     if (std::find(list.begin(), list.end(), elem) == list.end()) {
       list.push_back(elem);
@@ -116,6 +143,8 @@ class HashSetStriped : public HashSetBase<T> {
     return false;
   }
 
+  // Searches for an element in the bucket; if found, removes it.
+  // Returns true if the element was removed.
   bool FindAndErase(std::vector<T>& list, T& elem) {
     auto it = std::find(list.begin(), list.end(), elem);
     if (it != list.end()) {
@@ -125,44 +154,42 @@ class HashSetStriped : public HashSetBase<T> {
     return false;
   }
 
+  // Resizes the hash table by doubling its capacity if the load factor exceeds
+  // the threshold. Locks each bucket individually in index order to avoid
+  // deadlock during resizing.
   void resize(size_t current_capacity) {
     size_t old_capacity = current_capacity;
 
+    // Acquire unique locks for all buckets in a consistent order to avoid
+    // deadlocks.
     std::vector<std::unique_lock<std::mutex>> unique_locks;
     unique_locks.reserve(locks_.size());
 
-    // attempting to lock all mutex's in our locks list in idx order
     for (auto& lock : locks_) {
       unique_locks.emplace_back(lock);
     }
 
-    // if we attempted a resize block on acquiring the unique locks above then
-    // continued but the conditions that caused our resize may no longer be true
-    // if we were blocked due to another resize in the locks above rather than a
-    // add or remove. We no longer resize and return the RAII takes care of
-    // unlocking
+    // If another thread has already resized, exit without further action.
     if (old_capacity != capacity_.load()) {
-      // for (std::mutex& lock : locks_) {
-      //   lock.unlock();
-      // }
       return;
     }
 
+    // Create a new table with double the capacity.
     std::vector<std::vector<T>> old_table = table_;
     size_t new_capacity = capacity_.load() * 2;
     table_ = std::vector<std::vector<T>>(new_capacity);
 
+    // Reinsert each element from the old table into the resized table.
     for (std::vector<T>& bucket : old_table) {
       for (T& elem : bucket) {
         table_[std::hash<T>()(elem) % new_capacity].push_back(elem);
       }
     }
 
-    // Capacity is atmoic to prevent write reads of multiple threads with in the
-    // resize function at different points
+    // Update capacity to reflect the new size.
     capacity_.store(new_capacity);
 
-    // auto release unique locks due to RAII
+    // Unique locks automatically released on exit.
   }
 };
 

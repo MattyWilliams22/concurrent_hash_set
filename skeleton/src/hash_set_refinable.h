@@ -17,6 +17,7 @@ class HashSetRefinable : public HashSetBase<T> {
  public:
   explicit HashSetRefinable(size_t capacity)
       : table_(capacity), size_(0), capacity_(capacity), resizing_flag_(false) {
+    // Sets up a unique mutex for each bucket.
     for (size_t i = 0; i < capacity; i++) {
       locks_.push_back(std::make_unique<std::mutex>());
     }
@@ -29,39 +30,39 @@ class HashSetRefinable : public HashSetBase<T> {
     std::mutex* bucket_lock;
 
     while (true) {
-      // busy wait while resizing this flag allows mutual ex as in expert from
-      // textbook
+      // Loop here to retry if resizing is happening; prevents data
+      // inconsistency
       if (resizing_flag_.load()) {
+        // Busy-wait while another thread is resizing
       }
 
-      // standard procedure (as from striped) for getting current capacity
-      // etc... However, we use a shared mutex here to allow many threads to
-      // read the locks_ list but prevent it when we are writing in resize
+      // Read current capacity to determine the bucket; may change during resize
       current_capacity = capacity_.load();
       bucket_idx = std::hash<T>()(elem) % current_capacity;
 
-      // lock_shared to get a read lock to the locks_list
+      // Acquire a shared lock on locks_list_lock_ so multiple threads can read
+      // the locks_ list while no write access occurs during resize
       locks_list_lock_.lock_shared();
       bucket_lock = locks_[bucket_idx].get();
       locks_list_lock_.unlock_shared();
 
-      // lock as usual to add to our specific bucket
+      // Lock the specific bucket to ensure safe access to it
       bucket_lock->lock();
 
-      // someone has started resizing or has resized before we managed to
-      // acquire the lock hence we loop again and re calculate which bucket and
-      // lock If predicate pass it means no one is resizing or has resized while
-      // waiting to lock our information is in-date, and we can proceed adding
-      // to the bucket
+      // Check again that resizing hasn’t started or completed during our lock
+      // acquisition
       if (!resizing_flag_.load() && current_capacity == capacity_.load()) {
-        break;
+        break;  // Exit loop if data is valid and no resize is ongoing
       }
-      // unlock and try again as explained above ^
+      // Unlock and try again if resizing occurred
       bucket_lock->unlock();
     }
-    // Below explained in striped
+
+    // Attempt to add the element in the bucket; find or push it into the bucket
+    // list
     result = FindOrPushBack(table_[bucket_idx], elem);
 
+    // Atomically increment size if the element was added successfully
     if (result) size_.fetch_add(1);
 
     if (!result) {
@@ -69,13 +70,14 @@ class HashSetRefinable : public HashSetBase<T> {
       return false;
     }
 
+    // Check if resize is needed; if true, release bucket lock and resize
     if (size_.load() / current_capacity > 4) {
       bucket_lock->unlock();
-      resize(current_capacity);
+      resize(current_capacity);  // Resize the table
       return true;
     }
 
-    bucket_lock->unlock();
+    bucket_lock->unlock();  // Unlock the bucket if no resize is needed
     return true;
   }
 
@@ -84,9 +86,11 @@ class HashSetRefinable : public HashSetBase<T> {
     size_t bucket_idx;
     std::mutex* bucket_lock;
 
-    // Same locking mechanism as add
+    // Similar locking pattern as Add to ensure safety during concurrent access
+    // and resizing
     while (true) {
       if (resizing_flag_.load()) {
+        // Busy-wait if resizing is ongoing
       }
 
       size_t current_capacity = capacity_.load();
@@ -105,8 +109,10 @@ class HashSetRefinable : public HashSetBase<T> {
       bucket_lock->unlock();
     }
 
-    result = FindAndErase(table_[bucket_idx], elem);
+    result =
+        FindAndErase(table_[bucket_idx], elem);  // Attempt to remove element
 
+    // Atomically decrement size if the element was removed successfully
     if (result) size_.fetch_sub(1);
 
     bucket_lock->unlock();
@@ -119,9 +125,10 @@ class HashSetRefinable : public HashSetBase<T> {
     std::mutex* bucket_lock;
     size_t current_capacity;
 
-    // Same locking mechanism as add
+    // Same locking mechanism as Add to ensure thread-safe reads
     while (true) {
       if (resizing_flag_.load()) {
+        // Busy-wait while resizing is happening
       }
 
       current_capacity = capacity_.load();
@@ -140,8 +147,8 @@ class HashSetRefinable : public HashSetBase<T> {
       bucket_lock->unlock();
     }
 
+    // Check if the element exists in the bucket
     std::vector<T>& list = table_[bucket_idx];
-
     result = std::find(list.begin(), list.end(), elem) != list.end();
 
     bucket_lock->unlock();
@@ -155,40 +162,34 @@ class HashSetRefinable : public HashSetBase<T> {
   std::vector<std::unique_ptr<std::mutex>> locks_;
   std::atomic<size_t> size_;
   std::atomic<size_t> capacity_;
-  std::atomic<bool> resizing_flag_;
-  std::shared_mutex locks_list_lock_;
+  std::atomic<bool> resizing_flag_;  // Flag for signaling ongoing resize
+  std::shared_mutex
+      locks_list_lock_;  // Shared lock for managing access to locks_ list
 
   void resize(size_t old_capacity) {
     bool expected = false;
     bool desired = true;
-    bool result = resizing_flag_.std::atomic<bool>::compare_exchange_strong(
-        expected, desired);
+    bool result = resizing_flag_.compare_exchange_strong(expected, desired);
 
-    // Someone is already resizing so unnecessary
-    if (result != true) {
-      return;
+    if (!result) {
+      return;  // If another thread is resizing, skip this resize
     }
-    // checks on old capacity captured when resize is called and returns if that
-    // capacity is stale, and a thread beat us to resizing
+
     if (old_capacity != capacity_.load()) {
       resizing_flag_.compare_exchange_strong(desired, expected);
       return;
     }
 
-    // use lock shared than lock_shared to get a reader lock to the locks_list
-    // then block until the locks are unlocked --> this forces thread to get
-    // caught flag is being unforced
-    locks_list_lock_.lock_shared();
+    locks_list_lock_.lock_shared();  // Acquire shared lock for reading locks_
 
-    // Effectively is_locked? blocking from the book excerpt c++ style
     for (auto& mutex : locks_) {
       mutex->lock();
-      mutex->unlock();
+      mutex->unlock();  // Lock and unlock each bucket to ensure no ongoing
+                        // operation is blocked
     }
 
     locks_list_lock_.unlock_shared();
 
-    // same as stripped and coarse grained
     std::vector<std::vector<T>> old_table = table_;
     size_t new_capacity = capacity_.load() * 2;
     table_ = std::vector<std::vector<T>>(new_capacity);
@@ -199,8 +200,7 @@ class HashSetRefinable : public HashSetBase<T> {
       }
     }
 
-    // now calling lock on shared lock to get a write lock and mutex on whole
-    // list as we are modifying it
+    // Acquire exclusive lock to modify locks_ list and add new bucket locks
     locks_list_lock_.lock();
     for (size_t i = 0; i < old_capacity; i++) {
       locks_.push_back(std::make_unique<std::mutex>());
@@ -209,8 +209,8 @@ class HashSetRefinable : public HashSetBase<T> {
 
     capacity_.store(new_capacity);
 
-    // Effectively a notify-all for the flag which acts like a condition
-    resizing_flag_.compare_exchange_strong(desired, expected);
+    resizing_flag_.compare_exchange_strong(desired,
+                                           expected);  // Reset the resize flag
   }
 
   bool FindOrPushBack(std::vector<T>& list, T& elem) {
