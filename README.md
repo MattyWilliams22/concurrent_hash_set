@@ -12,8 +12,6 @@ This project was developed as part of a group coursework during the autumn term 
 ## Repository Structure
 
 - **`src/`**: Source code for all implementations.
-- **`tests/`**: Test suite for validating functionality and measuring performance.
-- **`doc/`**: Documentation and analysis of the implementations.
 
 ## Technologies Used
 
@@ -34,8 +32,6 @@ This project was developed as part of a group coursework during the autumn term 
    ```
 2. Build the project:
    ```bash
+   cd skeleton
    ./scripts/check_clean_build.sh
-   
-### License
-
-This project is licensed under the MIT License. See the LICENSE file for more details.
+   ```
